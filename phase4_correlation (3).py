@@ -1,24 +1,29 @@
 import pandas as pd
 import numpy as np
+import os  # Added for path handling
 
 MAX_LAG = 3
 TOLERANCE_DAYS = 3
 STD_EPS = 1e-8
+
 
 # -------------------------
 # Helpers: Load + Align
 # -------------------------
 def load_method1(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["window_start", "window_end"])
+    # Filter only topics 0-19
     df = df[df["topic_id"].between(0, 19)].copy()
     return df
 
+
 def overlap_filter(pol: pd.DataFrame, med: pd.DataFrame):
     start = max(pol["window_start"].min(), med["window_start"].min())
-    end   = min(pol["window_start"].max(), med["window_start"].max())
+    end = min(pol["window_start"].max(), med["window_start"].max())
     pol2 = pol[(pol["window_start"] >= start) & (pol["window_start"] <= end)].copy()
     med2 = med[(med["window_start"] >= start) & (med["window_start"] <= end)].copy()
     return pol2, med2, start, end
+
 
 def build_window_alignment(pol: pd.DataFrame, med: pd.DataFrame) -> pd.DataFrame:
     pol_w = pd.DataFrame({"pol_window_start": sorted(pol["window_start"].unique())}).sort_values("pol_window_start")
@@ -35,8 +40,10 @@ def build_window_alignment(pol: pd.DataFrame, med: pd.DataFrame) -> pd.DataFrame
 
     return aligned
 
+
 def topic_series(df: pd.DataFrame, tid: int) -> pd.Series:
     return df[df["topic_id"] == tid].set_index("window_start")["dominance"].sort_index()
+
 
 def aligned_vectors(pol: pd.DataFrame, med: pd.DataFrame, aligned: pd.DataFrame, tid: int):
     P = topic_series(pol, tid)  # politics
@@ -52,8 +59,9 @@ def aligned_vectors(pol: pd.DataFrame, med: pd.DataFrame, aligned: pd.DataFrame,
 
     return np.array(m_list, dtype=float), np.array(p_list, dtype=float)  # (media, politics)
 
+
 # -------------------------
-# Similarities required
+# Similarity Functions
 # -------------------------
 def pearson_corr(x, y):
     if len(x) < 5:
@@ -61,6 +69,7 @@ def pearson_corr(x, y):
     if np.std(x) < STD_EPS or np.std(y) < STD_EPS:
         return np.nan
     return float(np.corrcoef(x, y)[0, 1])
+
 
 def best_lag_correlation(media, politics, max_lag=3):
     best = None  # (abs_corr, lag, corr)
@@ -90,6 +99,7 @@ def best_lag_correlation(media, politics, max_lag=3):
         return None, np.nan, all_lags
     return best[1], best[2], all_lags  # best_lag, best_corr
 
+
 # --- Real-valued "Edit distance" (DP on sequences of floats) ---
 # Cost: substitution = abs(a-b), insertion=deletion=gap
 def real_edit_distance(a, b, gap=0.05):
@@ -108,6 +118,7 @@ def real_edit_distance(a, b, gap=0.05):
             dp[i, j] = min(sub, ins, dele)
 
     return float(dp[n, m])
+
 
 def best_lag_real_edit_similarity(media, politics, max_lag=3, gap=0.05):
     # Convert distance -> similarity in [0,1] using normalization
@@ -142,6 +153,7 @@ def best_lag_real_edit_similarity(media, politics, max_lag=3, gap=0.05):
         return None, np.nan, all_lags
     return best[1], best[0], all_lags  # best_lag, best_sim
 
+
 # --- DTW (Dynamic Time Warping) ---
 def dtw_distance(x, y):
     n, m = len(x), len(y)
@@ -158,6 +170,7 @@ def dtw_distance(x, y):
 
     return float(dp[n, m])
 
+
 def dtw_similarity(media, politics):
     if len(media) < 5 or len(politics) < 5:
         return np.nan
@@ -165,6 +178,7 @@ def dtw_similarity(media, politics):
     # normalize similarly
     norm = 1.0 * min(len(media), len(politics)) + 0.05 * (len(media) + len(politics))
     return 1.0 - (dist / norm)
+
 
 # -------------------------
 # Direction change detection
@@ -186,23 +200,31 @@ def split_direction(media, politics):
 
     return leader_from_lag(lag1), leader_from_lag(lag2)
 
+
 # -------------------------
-# Main analysis
+# Main Analysis Function
 # -------------------------
 def analyze_country(country, media_path, politics_path, out_csv):
-    med = load_method1(media_path)
-    pol = load_method1(politics_path)
+    print(f"Loading data for {country}...")
+    try:
+        med = load_method1(media_path)
+        pol = load_method1(politics_path)
+    except FileNotFoundError as e:
+        print(f"ERROR: Could not find file. {e}")
+        return None
 
     pol, med, start, end = overlap_filter(pol, med)
     aligned = build_window_alignment(pol, med)
 
-    print(f"\n{country} overlap: {start.date()} -> {end.date()}")
+    print(f"{country} overlap: {start.date()} -> {end.date()}")
     print(f"{country} aligned pairs (±{TOLERANCE_DAYS}d): {len(aligned)}")
 
     rows = []
+    # Check topics 0 to 19
     for tid in range(20):
         topic_label = None
         if "topic_label" in med.columns:
+            # Try to grab label from media file
             lab = med.loc[med["topic_id"] == tid, "topic_label"]
             if len(lab) > 0:
                 topic_label = str(lab.iloc[0])
@@ -220,7 +242,7 @@ def analyze_country(country, media_path, politics_path, out_csv):
         # DTW similarity (no lag)
         sim_dtw = dtw_similarity(media_vals, politics_vals)
 
-        # dominant direction from correlation lag
+        # Dominant direction from correlation lag
         if best_lag_c is None or np.isnan(best_corr):
             direction = "unknown"
         elif best_lag_c > 0:
@@ -230,7 +252,7 @@ def analyze_country(country, media_path, politics_path, out_csv):
         else:
             direction = "sync"
 
-        # Direction change
+        # Direction change detection
         first_dir, second_dir = split_direction(media_vals, politics_vals)
         changing = (first_dir is not None and second_dir is not None and first_dir != second_dir)
 
@@ -256,18 +278,41 @@ def analyze_country(country, media_path, politics_path, out_csv):
 
     out = pd.DataFrame(rows)
     out.to_csv(out_csv, index=False)
-    print("Saved:", out_csv, "| rows:", len(out))
+    print(f"✅ Saved results to: {out_csv} | rows: {len(out)}")
     return out
 
+
+# -------------------------
+# Execution Block
+# -------------------------
 if __name__ == "__main__":
-    analyze_country("UK",
-        "phaseB_method1/uk_media_method1.csv",
-        "phaseB_method1/uk_politics_method1.csv",
-        "UK_stageD_results.csv"
+    # 1. Define your base paths (Same as Phase 2 & 3)
+    BASE_DIR = r"C:\Users\mordih\Desktop\ihzur"
+    INPUT_DIR = os.path.join(BASE_DIR, "phaseB_method1")
+
+    # 2. Define Output Filenames
+    uk_results_file = os.path.join(BASE_DIR, "UK_stageD_results.csv")
+    us_results_file = os.path.join(BASE_DIR, "USA_stageD_results.csv")
+
+    print(f"Reading input files from: {INPUT_DIR}")
+    print(f"Saving results to: {BASE_DIR}\n")
+
+    # 3. Run UK Analysis
+    print("--- Analyzing UK (DTW & Edit Distance) ---")
+    analyze_country(
+        "UK",
+        os.path.join(INPUT_DIR, "uk_media_method1.csv"),
+        os.path.join(INPUT_DIR, "uk_politics_method1.csv"),
+        uk_results_file
     )
 
-    analyze_country("USA",
-        "phaseB_method1/us_media_method1.csv",
-        "phaseB_method1/us_politics_method1.csv",
-        "USA_stageD_results.csv"
+    # 4. Run USA Analysis
+    print("\n--- Analyzing USA (DTW & Edit Distance) ---")
+    analyze_country(
+        "USA",
+        os.path.join(INPUT_DIR, "us_media_method1.csv"),
+        os.path.join(INPUT_DIR, "us_politics_method1.csv"),
+        us_results_file
     )
+
+    print("\n✅ Phase 4 Completed Successfully.")

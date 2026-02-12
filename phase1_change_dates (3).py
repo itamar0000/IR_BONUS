@@ -1,32 +1,45 @@
 import os
 import re
 import pandas as pd
+import ftfy  # NEW dependency: pip install ftfy
+import html  # Built-in
 from pathlib import Path
 
-# --- keep using YOUR clean_text() as-is ---
-# (paste your existing clean_text here, unchanged)
+
+# --- UPDATED METICULOUS CLEANER ---
 def clean_text(text):
     """
-    Cleans the raw text files.
+    Cleans raw text while preserving structure for embeddings.
     """
-    # 1. Remove tags
-    text = text.replace('\\', '')
-    # 2. Remove HTML tags (like <pre>, <br>)
-    text = re.sub(r'<[^>]+>', '', text)
+    if not isinstance(text, str):
+        return ""
 
-    # 3. Remove specific noise observed in NBC/Congressional logs
+    # 1. Fix Encoding & Mojibake (CRITICAL for political names)
+    # Fixes things like "â€™" -> "'"
+    text = ftfy.fix_text(text)
+
+    # 2. Decode HTML entities (&amp; -> &)
+    text = html.unescape(text)
+
+    # 3. Structural/Tag Removal
+    text = text.replace('\\', '')
+    text = re.sub(r'<[^>]+>', '', text)  # HTML tags
+
+    # 4. Domain-Specific Noise Removal (Your custom rules)
     text = text.replace('Extensions of Remarks', '')
     text = text.replace('Congressional Record Vol.', '')
 
-    # 4. Attempt to remove NBC Cookie Notice
     if "This Cookie Notice" in text:
         text = text.split("This Cookie Notice")[0]
 
-    # 5. Remove extra whitespace and newlines
+    # 5. URL & Email Stripping (Noise for topic models)
+    text = re.sub(r'http\S+', '', text)
+    text = re.sub(r'\S+@\S+', '', text)
+
+    # 6. Normalize Whitespace (Final Polish)
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text
-
 
 # --- DATE PARSERS (updated to your exact filename formats) ---
 
